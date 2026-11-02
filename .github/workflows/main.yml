@@ -30,6 +30,9 @@ on:
         default: true
         type: boolean
 
+env:
+  PIP_BREAK_SYSTEM_PACKAGES: "1"
+
 jobs:
   build-ipa:
     runs-on: macos-latest
@@ -51,10 +54,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo "==> Проверка Metal Toolchain..."
           xcodebuild -downloadComponent MetalToolchain || true
-          brew install xcodegen zstd glslang spirv-cross unar p7zip
-          python3 -m pip install --upgrade pip
-          python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic gdown "backports.zstd; python_version < '3.14'"
+
+          echo "==> Установка пакетов Homebrew..."
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen zstd glslang spirv-cross p7zip
+
+          echo "==> Установка Python-пакетов (с обходом PEP 668)..."
+          python3 -m pip install --break-system-packages --upgrade pip
+          python3 -m pip install --break-system-packages lz4 "capstone>=5,<6" fonttools nsz zbic gdown "backports.zstd; python_version < '3.14'"
+
+          # Добавляем пользовательскую папку bin в PATH (для gdown и nsz)
+          USER_BASE=$(python3 -m site --user-base)
+          echo "$USER_BASE/bin" >> $GITHUB_PATH
 
       - name: Скачивание файлов игры и prod.keys
         shell: bash
@@ -70,6 +82,16 @@ jobs:
           DL_DIR="$WORK_DIR/downloads"
           mkdir -p "$GAME_DIR" "$DL_DIR"
 
+          if [[ -z "$GAME_URL" ]]; then
+            echo "::error::Не указана ссылка на игру (GAME_URL)! Введите её при запуске Run workflow или добавьте в Settings -> Secrets -> Actions."
+            exit 1
+          fi
+
+          if [[ -z "$KEYS_URL" ]]; then
+            echo "::error::Не указана ссылка на ключи (KEYS_URL)! Введите её при запуске Run workflow или добавьте в Settings -> Secrets -> Actions."
+            exit 1
+          fi
+
           download_and_extract() {
             local url="$1"
             local target_dir="$2"
@@ -79,39 +101,39 @@ jobs:
 
             echo "==> Скачивание: $label..."
             if [[ "$url" == *"drive.google.com"* ]]; then
-              gdown --fuzzy "$url" -O "$sub_dl/"
+              python3 -m gdown --fuzzy "$url" -O "$sub_dl/"
             else
-               (cd "$sub_dl" && curl -L -J -O "$url")
+              (cd "$sub_dl" && curl -L -J -O "$url")
             fi
 
+            shopt -s nocaseglob
             for f in "$sub_dl"/*; do
               [[ -e "$f" ]] || continue
-              case "${f,,}" in
+              case "$f" in
                 *.zip|*.7z|*.rar|*.tar*)
                   echo "==> Распаковка архива $f..."
-                  unar -f -o "$target_dir" "$f"
+                  7z x "$f" -o"$target_dir" -y
                   ;;
                 *)
                   mv "$f" "$target_dir/"
                   ;;
               esac
             done
+            shopt -u nocaseglob
           }
 
-          if [[ -z "$GAME_URL" ]] || [[ -z "$KEYS_URL" ]]; then
-            echo "::error::Не указаны ссылки на игру (GAME_URL) или ключи (KEYS_URL)!"
-            exit 1
-          fi
-
-          # Скачиваем prod.keys
-          mkdir -p "$DL_DIR/keys"
+          echo "==> Скачивание prod.keys..."
           if [[ "$KEYS_URL" == *"drive.google.com"* ]]; then
-            gdown --fuzzy "$KEYS_URL" -O "$WORK_DIR/prod.keys"
+            python3 -m gdown --fuzzy "$KEYS_URL" -O "$WORK_DIR/prod.keys"
           else
             curl -L "$KEYS_URL" -o "$WORK_DIR/prod.keys"
           fi
 
-          # Скачиваем базовую игру, апдейт и DLC
+          if [[ ! -s "$WORK_DIR/prod.keys" ]] || grep -qi "<html" "$WORK_DIR/prod.keys"; then
+            echo "::error::Файл prod.keys не скачался или вместо него скачалась веб-страница! Проверьте доступ 'Все, у кого есть ссылка' на Google Drive."
+            exit 1
+          fi
+
           download_and_extract "$GAME_URL" "$GAME_DIR" "base"
           
           if [[ -n "$UPDATE_URL" ]]; then
@@ -122,8 +144,8 @@ jobs:
             download_and_extract "$DLC_URL" "$GAME_DIR" "dlc"
           fi
 
-          # Если при распаковке создалась вложенная папка, перемещаем файлы игры в корень GAME_DIR
-          find "$GAME_DIR" -mindepth 2 -type f \( -iname "*.nsp" -o -iname "*.xci" -o -iname "*.nsz" -o -iname "*.xcz" \) -exec mv -t "$GAME_DIR" {} +
+          # Перемещение всех файлов дампов из подпапок в корень GAME_DIR
+          find "$GAME_DIR" -mindepth 2 -type f \( -iname "*.nsp" -o -iname "*.xci" -o -iname "*.nsz" -o -iname "*.xcz" \) -exec mv {} "$GAME_DIR/" \;
 
           echo "==> Файлы в папке сборки:"
           ls -lh "$GAME_DIR"
