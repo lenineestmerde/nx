@@ -1,0 +1,166 @@
+name: NxNative - Auto IPA Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      game_url:
+        description: "Ссылка на базовую игру (.nsp/.xci/.nsz или архив) [Оставьте пустым, если используете Secrets]"
+        required: false
+        type: string
+      update_url:
+        description: "Ссылка на патч/обновление (.nsp) [Опционально]"
+        required: false
+        type: string
+      dlc_url:
+        description: "Ссылка на DLC (.nsp или архив со всеми DLC) [Опционально]"
+        required: false
+        type: string
+      keys_url:
+        description: "Ссылка на файл prod.keys [Оставьте пустым, если используете Secrets]"
+        required: false
+        type: string
+      extra_flags:
+        description: "Доп. флаги сборки (например: --romfs separate или -l ru)"
+        required: false
+        default: ""
+        type: string
+      allow_other_metal:
+        description: "Разрешить сборку с текущей версией Metal в облаке (--allow-other-metal)"
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Клонирование официального репозитория seedds/nxnative
+        uses: actions/checkout@v4
+        with:
+          repository: seedds/nxnative
+          fetch-depth: 1
+
+      - name: Установка .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Установка системных зависимостей и Python-библиотек
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -downloadComponent MetalToolchain || true
+          brew install xcodegen zstd glslang spirv-cross unar p7zip
+          python3 -m pip install --upgrade pip
+          python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic gdown "backports.zstd; python_version < '3.14'"
+
+      - name: Скачивание файлов игры и prod.keys
+        shell: bash
+        env:
+          GAME_URL: ${{ inputs.game_url || secrets.GAME_URL }}
+          UPDATE_URL: ${{ inputs.update_url || secrets.UPDATE_URL }}
+          DLC_URL: ${{ inputs.dlc_url || secrets.DLC_URL }}
+          KEYS_URL: ${{ inputs.keys_url || secrets.KEYS_URL }}
+        run: |
+          set -euo pipefail
+          WORK_DIR="$RUNNER_TEMP/nx_work"
+          GAME_DIR="$WORK_DIR/game"
+          DL_DIR="$WORK_DIR/downloads"
+          mkdir -p "$GAME_DIR" "$DL_DIR"
+
+          download_and_extract() {
+            local url="$1"
+            local target_dir="$2"
+            local label="$3"
+            local sub_dl="$DL_DIR/$label"
+            mkdir -p "$sub_dl"
+
+            echo "==> Скачивание: $label..."
+            if [[ "$url" == *"drive.google.com"* ]]; then
+              gdown --fuzzy "$url" -O "$sub_dl/"
+            else
+               (cd "$sub_dl" && curl -L -J -O "$url")
+            fi
+
+            for f in "$sub_dl"/*; do
+              [[ -e "$f" ]] || continue
+              case "${f,,}" in
+                *.zip|*.7z|*.rar|*.tar*)
+                  echo "==> Распаковка архива $f..."
+                  unar -f -o "$target_dir" "$f"
+                  ;;
+                *)
+                  mv "$f" "$target_dir/"
+                  ;;
+              esac
+            done
+          }
+
+          if [[ -z "$GAME_URL" ]] || [[ -z "$KEYS_URL" ]]; then
+            echo "::error::Не указаны ссылки на игру (GAME_URL) или ключи (KEYS_URL)!"
+            exit 1
+          fi
+
+          # Скачиваем prod.keys
+          mkdir -p "$DL_DIR/keys"
+          if [[ "$KEYS_URL" == *"drive.google.com"* ]]; then
+            gdown --fuzzy "$KEYS_URL" -O "$WORK_DIR/prod.keys"
+          else
+            curl -L "$KEYS_URL" -o "$WORK_DIR/prod.keys"
+          fi
+
+          # Скачиваем базовую игру, апдейт и DLC
+          download_and_extract "$GAME_URL" "$GAME_DIR" "base"
+          
+          if [[ -n "$UPDATE_URL" ]]; then
+            download_and_extract "$UPDATE_URL" "$GAME_DIR" "update"
+          fi
+
+          if [[ -n "$DLC_URL" ]]; then
+            download_and_extract "$DLC_URL" "$GAME_DIR" "dlc"
+          fi
+
+          # Если при распаковке создалась вложенная папка, перемещаем файлы игры в корень GAME_DIR
+          find "$GAME_DIR" -mindepth 2 -type f \( -iname "*.nsp" -o -iname "*.xci" -o -iname "*.nsz" -o -iname "*.xcz" \) -exec mv -t "$GAME_DIR" {} +
+
+          echo "==> Файлы в папке сборки:"
+          ls -lh "$GAME_DIR"
+
+      - name: Компиляция и упаковка .IPA через nxnative
+        shell: bash
+        env:
+          EXTRA_FLAGS: ${{ inputs.extra_flags }}
+          ALLOW_METAL: ${{ inputs.allow_other_metal }}
+        run: |
+          set -euo pipefail
+          WORK_DIR="$RUNNER_TEMP/nx_work"
+          GAME_DIR="$WORK_DIR/game"
+          OUTPUT_IPA="$WORK_DIR/NxNative_Port.ipa"
+
+          CMD_ARGS=("$GAME_DIR" -k "$WORK_DIR/prod.keys" -o "$OUTPUT_IPA")
+          
+          if [[ "$ALLOW_METAL" == "true" ]]; then
+            CMD_ARGS+=(--allow-other-metal)
+          fi
+
+          if [[ -n "$EXTRA_FLAGS" ]]; then
+            read -r -a EXTRA_ARR <<< "$EXTRA_FLAGS"
+            CMD_ARGS+=("${EXTRA_ARR[@]}")
+          fi
+
+          echo "==> Запуск сборки: python3 scripts/build_ipa_from_nsp.py ${CMD_ARGS[*]}"
+          python3 scripts/build_ipa_from_nsp.py "${CMD_ARGS[@]}"
+
+          if [[ ! -s "$OUTPUT_IPA" ]]; then
+            echo "::error::Сборка завершилась без создания .ipa файла!"
+            exit 1
+          fi
+
+      - name: Выгрузка готового .IPA в Артефакты
+        uses: actions/upload-artifact@v4
+        with:
+          name: NxNative-Finished-IPA
+          path: ${{ runner.temp }}/nx_work/*.ipa
+          retention-days: 5
