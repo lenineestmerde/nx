@@ -60,13 +60,16 @@ jobs:
           echo "==> Установка пакетов Homebrew..."
           HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen zstd glslang spirv-cross p7zip
 
-          echo "==> Установка Python-пакетов (с обходом PEP 668)..."
-          python3 -m pip install --break-system-packages --upgrade pip
-          python3 -m pip install --break-system-packages lz4 "capstone>=5,<6" fonttools nsz zbic gdown "backports.zstd; python_version < '3.14'"
+          echo "==> Создание изолированного виртуального окружения Python..."
+          VENV_DIR="$RUNNER_TEMP/nx_venv"
+          python3 -m venv "$VENV_DIR"
+          
+          # Делаем виртуальное окружение активным для всех следующих шагов GitHub Actions
+          echo "$VENV_DIR/bin" >> "$GITHUB_PATH"
+          export PATH="$VENV_DIR/bin:$PATH"
 
-          # Добавляем пользовательскую папку bin в PATH (для gdown и nsz)
-          USER_BASE=$(python3 -m site --user-base)
-          echo "$USER_BASE/bin" >> $GITHUB_PATH
+          echo "==> Установка Python-зависимостей внутри venv..."
+          "$VENV_DIR/bin/pip" install lz4 "capstone>=5,<6" fonttools nsz zbic gdown "backports.zstd; python_version < '3.14'"
 
       - name: Скачивание файлов игры и prod.keys
         shell: bash
