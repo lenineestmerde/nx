@@ -45,6 +45,47 @@ jobs:
           repository: seedds/nxnative
           fetch-depth: 1
 
+      - name: Патч совместимости MetalFX (nvn_mtl.m) с SDK GitHub Actions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - << 'EOF'
+          import re, sys, pathlib
+
+          files = list(pathlib.Path(".").rglob("nvn_mtl.m"))
+          if not files:
+              print("::error::Файл nvn_mtl.m не найден в репозитории!")
+              sys.exit(1)
+
+          total_patched = 0
+          for p in files:
+              text = p.read_text(encoding="utf-8")
+              # Комментируем все обращения вида sc.*OffsetX = ...; и sc.*OffsetY = ...;
+              patched, count = re.subn(
+                  r'(\bsc\.[A-Za-z0-9_]*Offset[XY]\s*=\s*[^;]+;)',
+                  r'/* \1 */',
+                  text
+              )
+              if count > 0:
+                  p.write_text(patched, encoding="utf-8")
+                  total_patched += count
+                  print(f"==> Успешно пропатчено {count} свойств OffsetX/OffsetY в файле: {p}")
+
+          if total_patched == 0:
+              print("::warning::Свойства OffsetX/OffsetY не найдены регулярным выражением, проверяем строки с DLSS_...")
+              for p in files:
+                  lines = p.read_text(encoding="utf-8").splitlines()
+                  new_lines = []
+                  for line in lines:
+                      if "OffsetX" in line or "OffsetY" in line:
+                          new_lines.append(f"// {line}")
+                          total_patched += 1
+                      else:
+                          new_lines.append(line)
+                  p.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+                  print(f"==> Закомментировано строк напрямую: {total_patched} в {p}")
+          EOF
+
       - name: Установка .NET SDK
         uses: actions/setup-dotnet@v4
         with:
@@ -69,29 +110,6 @@ jobs:
 
           echo "==> Установка Python-зависимостей внутри venv..."
           "$VENV_DIR/bin/pip" install lz4 "capstone>=5,<6" fonttools nsz zbic gdown "backports.zstd; python_version < '3.14'"
-
-      - name: Патч совместимости MetalFX (nvn_mtl.m) с SDK GitHub Actions
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - << 'EOF'
-          import re, pathlib
-
-          p = pathlib.Path("gfx/nvn/nvn_mtl.m")
-          if p.exists():
-              text = p.read_text(encoding="utf-8")
-              # Комментируем обращения к отсутствующим в SDK свойствам *OffsetX / *OffsetY у MTL4FXTemporalScaler
-              patched, count = re.subn(
-                  r'(\bsc\.[A-Za-z0-9_]*Offset[XY]\s*=\s*[^;]+;)',
-                  r'/* \1 */',
-                  text
-              )
-              if count > 0:
-                  p.write_text(patched, encoding="utf-8")
-                  print(f"==> Успешно пропатчено {count} обращений к OffsetX/OffsetY в {p}")
-              else:
-                  print(f"==> Обращения OffsetX/OffsetY в {p} не найдены, пропуск.")
-          EOF
 
       - name: Скачивание файлов игры и prod.keys
         shell: bash
@@ -181,7 +199,7 @@ jobs:
           echo "==> Скачивание prod.keys..."
           smart_download "$KEYS_URL" "$WORK_DIR/prod.keys"
 
-          if [[ ! -s "$WORK_DIR/prod.keys" ]] || grep -qi "<html" "$WORK_DIR/prod.keys"; then
+          if [[ ! -s "$WORK_DIR/prod.keys" ]] \vert{}\vert{} grep -qi "<html" "$WORK_DIR/prod.keys"; then
             echo "::error::Файл prod.keys не скачался или вместо него скачалась веб-страница! Проверьте доступ 'Все, у кого есть ссылка' на Google Drive."
             exit 1
           fi
@@ -225,12 +243,11 @@ jobs:
 
           echo "==> Запуск сборки: python3 scripts/build_ipa_from_nsp.py ${CMD_ARGS[*]}"
           if ! python3 scripts/build_ipa_from_nsp.py "${CMD_ARGS[@]}"; then
-            echo "::error::Ошибка при сборке! Вывод полных логов компиляции:"
+            echo "::error::Ошибка при сборке! Вывод логов, содержащих ошибки:"
             for logfile in "$GAME_DIR"/*_build/logs/*.log; do
-              if [[ -f "$logfile" ]]; then
-                echo "==================== $logfile ===================="
-                grep -E "error:|fatal error:" "$logfile" || true
-                tail -n 60 "$logfile"
+              if [[ -f "$logfile" ]] && grep -qE "error:|fatal error:|Error" "$logfile"; then
+                echo "==================== ОШИБКИ В $logfile ===================="
+                grep -C 3 -E "error:|fatal error:" "$logfile" \vert{}\vert{} tail -n 50 "$logfile"
               fi
             done
             exit 1
@@ -242,8 +259,3 @@ jobs:
           fi
 
       - name: Выгрузка готового .IPA в Артефакты
-        uses: actions/upload-artifact@v4
-        with:
-          name: NxNative-Finished-IPA
-          path: ${{ runner.temp }}/nx_work/*.ipa
-          retention-days: 5
