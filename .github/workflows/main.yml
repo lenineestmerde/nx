@@ -94,20 +94,31 @@ jobs:
             exit 1
           fi
 
-          # Функция надёжного скачивания через Python API gdown или curl
+          # Универсальное скачивание: само извлекает ID из любой ссылки Google Drive без параметра fuzzy
           smart_download() {
             local url="$1"
             local out_path="$2"
             if [[ "$url" == *"drive.google.com"* ]]; then
               python3 - "$url" "$out_path" << 'EOF'
-          import sys, os, gdown
-          url, out = sys.argv[1], sys.argv[2]
+          import sys, os, re, gdown
+
+          url, out = sys.argv[1].strip(), sys.argv[2].strip()
+
           if "/folders/" in url:
-              gdown.download_folder(url=url, output=out, quiet=False, remaining_ok=True)
+              gdown.download_folder(url=url, output=out, quiet=False)
           else:
               if os.path.isdir(out):
                   out = out.rstrip("/") + "/"
-              res = gdown.download(url=url, output=out, quiet=False, fuzzy=True)
+              
+              # Извлекаем ID файла из ссылок вида /d/ID, id=ID
+              m = re.search(r'(?:/d/|id=)([a-zA-Z0-9_-]{10,})', url)
+              if m:
+                  file_id = m.group(1)
+                  dl_url = f"https://drive.google.com/uc?id={file_id}"
+              else:
+                  dl_url = url
+
+              res = gdown.download(url=dl_url, output=out, quiet=False)
               if not res:
                   sys.exit(1)
           EOF
