@@ -64,7 +64,6 @@ jobs:
           VENV_DIR="$RUNNER_TEMP/nx_venv"
           python3 -m venv "$VENV_DIR"
           
-          # Делаем виртуальное окружение активным для всех следующих шагов GitHub Actions
           echo "$VENV_DIR/bin" >> "$GITHUB_PATH"
           export PATH="$VENV_DIR/bin:$PATH"
 
@@ -95,6 +94,32 @@ jobs:
             exit 1
           fi
 
+          # Функция надёжного скачивания через Python API gdown или curl
+          smart_download() {
+            local url="$1"
+            local out_path="$2"
+            if [[ "$url" == *"drive.google.com"* ]]; then
+              python3 - "$url" "$out_path" << 'EOF'
+          import sys, os, gdown
+          url, out = sys.argv[1], sys.argv[2]
+          if "/folders/" in url:
+              gdown.download_folder(url=url, output=out, quiet=False, remaining_ok=True)
+          else:
+              if os.path.isdir(out):
+                  out = out.rstrip("/") + "/"
+              res = gdown.download(url=url, output=out, quiet=False, fuzzy=True)
+              if not res:
+                  sys.exit(1)
+          EOF
+            else
+              if [[ -d "$out_path" ]]; then
+                (cd "$out_path" && curl -L -J -O "$url")
+              else
+                curl -L "$url" -o "$out_path"
+              fi
+            fi
+          }
+
           download_and_extract() {
             local url="$1"
             local target_dir="$2"
@@ -103,11 +128,7 @@ jobs:
             mkdir -p "$sub_dl"
 
             echo "==> Скачивание: $label..."
-            if [[ "$url" == *"drive.google.com"* ]]; then
-              python3 -m gdown --fuzzy "$url" -O "$sub_dl/"
-            else
-              (cd "$sub_dl" && curl -L -J -O "$url")
-            fi
+            smart_download "$url" "$sub_dl"
 
             shopt -s nocaseglob
             for f in "$sub_dl"/*; do
@@ -126,11 +147,7 @@ jobs:
           }
 
           echo "==> Скачивание prod.keys..."
-          if [[ "$KEYS_URL" == *"drive.google.com"* ]]; then
-            python3 -m gdown --fuzzy "$KEYS_URL" -O "$WORK_DIR/prod.keys"
-          else
-            curl -L "$KEYS_URL" -o "$WORK_DIR/prod.keys"
-          fi
+          smart_download "$KEYS_URL" "$WORK_DIR/prod.keys"
 
           if [[ ! -s "$WORK_DIR/prod.keys" ]] || grep -qi "<html" "$WORK_DIR/prod.keys"; then
             echo "::error::Файл prod.keys не скачался или вместо него скачалась веб-страница! Проверьте доступ 'Все, у кого есть ссылка' на Google Drive."
