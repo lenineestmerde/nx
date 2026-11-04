@@ -70,6 +70,29 @@ jobs:
           echo "==> Установка Python-зависимостей внутри venv..."
           "$VENV_DIR/bin/pip" install lz4 "capstone>=5,<6" fonttools nsz zbic gdown "backports.zstd; python_version < '3.14'"
 
+      - name: Патч совместимости MetalFX (nvn_mtl.m) с SDK GitHub Actions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - << 'EOF'
+          import re, pathlib
+
+          p = pathlib.Path("gfx/nvn/nvn_mtl.m")
+          if p.exists():
+              text = p.read_text(encoding="utf-8")
+              # Комментируем обращения к отсутствующим в SDK свойствам *OffsetX / *OffsetY у MTL4FXTemporalScaler
+              patched, count = re.subn(
+                  r'(\bsc\.[A-Za-z0-9_]*Offset[XY]\s*=\s*[^;]+;)',
+                  r'/* \1 */',
+                  text
+              )
+              if count > 0:
+                  p.write_text(patched, encoding="utf-8")
+                  print(f"==> Успешно пропатчено {count} обращений к OffsetX/OffsetY в {p}")
+              else:
+                  print(f"==> Обращения OffsetX/OffsetY в {p} не найдены, пропуск.")
+          EOF
+
       - name: Скачивание файлов игры и prod.keys
         shell: bash
         env:
@@ -94,7 +117,6 @@ jobs:
             exit 1
           fi
 
-          # Универсальное скачивание: само извлекает ID из любой ссылки Google Drive без параметра fuzzy
           smart_download() {
             local url="$1"
             local out_path="$2"
@@ -110,7 +132,6 @@ jobs:
               if os.path.isdir(out):
                   out = out.rstrip("/") + "/"
               
-              # Извлекаем ID файла из ссылок вида /d/ID, id=ID
               m = re.search(r'(?:/d/|id=)([a-zA-Z0-9_-]{10,})', url)
               if m:
                   file_id = m.group(1)
@@ -175,7 +196,6 @@ jobs:
             download_and_extract "$DLC_URL" "$GAME_DIR" "dlc"
           fi
 
-          # Перемещение всех файлов дампов из подпапок в корень GAME_DIR
           find "$GAME_DIR" -mindepth 2 -type f \( -iname "*.nsp" -o -iname "*.xci" -o -iname "*.nsz" -o -iname "*.xcz" \) -exec mv {} "$GAME_DIR/" \;
 
           echo "==> Файлы в папке сборки:"
@@ -204,7 +224,17 @@ jobs:
           fi
 
           echo "==> Запуск сборки: python3 scripts/build_ipa_from_nsp.py ${CMD_ARGS[*]}"
-          python3 scripts/build_ipa_from_nsp.py "${CMD_ARGS[@]}"
+          if ! python3 scripts/build_ipa_from_nsp.py "${CMD_ARGS[@]}"; then
+            echo "::error::Ошибка при сборке! Вывод полных логов компиляции:"
+            for logfile in "$GAME_DIR"/*_build/logs/*.log; do
+              if [[ -f "$logfile" ]]; then
+                echo "==================== $logfile ===================="
+                grep -E "error:|fatal error:" "$logfile" || true
+                tail -n 60 "$logfile"
+              fi
+            done
+            exit 1
+          fi
 
           if [[ ! -s "$OUTPUT_IPA" ]]; then
             echo "::error::Сборка завершилась без создания .ipa файла!"
